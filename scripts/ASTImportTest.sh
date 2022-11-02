@@ -39,7 +39,7 @@ source "${REPO_ROOT}/scripts/common.sh"
 
 function print_usage
 {
-    fail "Usage: ${0} ast [--exit-on-error]."
+    fail "Usage: ${0} ast|evm-assembly [--exit-on-error]."
 }
 
 function print_used_commands
@@ -75,6 +75,7 @@ for PARAM in "$@"
 do
     case "$PARAM" in
         ast) IMPORT_TEST_TYPE="ast" ;;
+        evm-assembly) IMPORT_TEST_TYPE="evm-assembly" ;;
         --exit-on-error) EXIT_ON_ERROR=1 ;;
         *) print_usage ;;
     esac
@@ -82,6 +83,7 @@ done
 
 SYNTAXTESTS_DIR="${REPO_ROOT}/test/libsolidity/syntaxTests"
 ASTJSONTESTS_DIR="${REPO_ROOT}/test/libsolidity/ASTJSON"
+SEMANTICTESTS_DIR="${REPO_ROOT}/test/libsolidity/semanticTests"
 
 FAILED=0
 UNCOMPILABLE=0
@@ -127,6 +129,106 @@ function ast_import_export_equivalence
     TESTED=$((TESTED + 1))
 }
 
+function evmjson_import_export_equivalence
+{
+    local sol_file="$1"
+    local input_files=( "${@:2}" )
+    local outputs=( "asm" "bin" "bin-runtime" "opcodes" "srcmap" "srcmap-runtime" )
+    local export_command=("$SOLC" --combined-json "$(IFS=, ; echo "${outputs[*]}")" --pretty-json --json-indent 4 "${input_files[@]}")
+    local success=1
+    if ! "${export_command[@]}" > expected.json 2> expected.error
+    then
+        success=0
+        printError "❌ ERROR: (export) EVM Assembly JSON reimport failed for ${sol_file}"
+        if [[ $EXIT_ON_ERROR == 1 ]]
+        then
+            print_used_commands "$(pwd)" "${export_command[*]}" ""
+            return 1
+        fi
+    fi
+
+    # Note that we have some test files, that only consists of free functions.
+    # Those files doesn't define any contracts, so the resulting json does not define any
+    # keys. In this case `jq` returns an error like `jq: error: null (null) has no keys`
+    # to not get spammed by these errors, errors are redirected to /dev/null.
+    for contract in $(jq '.contracts | keys | .[]' expected.json 2> /dev/null)
+    do
+        for output in "${outputs[@]}"
+        do
+            jq --raw-output ".contracts.${contract}.\"${output}\"" expected.json > "expected.${output}.json"
+        done
+
+        assembly=$(cat expected.asm.json)
+        [[ $assembly != "" && $assembly != "null" ]] || continue
+
+        local import_command=("${SOLC}" --combined-json "bin,bin-runtime,opcodes,asm,srcmap,srcmap-runtime" --pretty-json --json-indent 4 --import-asm-json expected.asm.json)
+        if ! "${import_command[@]}" > obtained.json 2> obtained.error
+        then
+            success=0
+            printError "❌ ERROR: (import) EVM Assembly JSON reimport failed for ${sol_file}"
+            if [[ $EXIT_ON_ERROR == 1 ]]
+            then
+                print_used_commands "$(pwd)" "${export_command[*]}" "${import_command[*]}"
+                return 1
+            fi
+        fi
+
+        for output in "${outputs[@]}"
+        do
+            for obtained_contract in $(jq '.contracts | keys | .[]' obtained.json  2> /dev/null)
+            do
+                jq --raw-output ".contracts.${obtained_contract}.\"${output}\"" obtained.json > "obtained.${output}.json"
+                # compare expected and obtained evm assembly json
+                if ! diff_files "expected.${output}.json" "obtained.${output}.json"
+                then
+                    success=0
+                    printError "❌ ERROR: (${output}) EVM Assembly JSON reimport failed for ${sol_file}"
+                    if [[ $EXIT_ON_ERROR == 1 ]]
+                    then
+                        print_used_commands "$(pwd)" "${export_command[*]}" "${import_command[*]}"
+                        return 1
+                    fi
+                fi
+            done
+        done
+
+        # direct export via --asm-json, if imported with --import-asm-json.
+        if ! "${SOLC}" --asm-json --import-asm-json expected.asm.json --pretty-json --json-indent 4 | tail -n+4 > obtained_direct_import_export.json 2> obtained_direct_import_export.error
+        then
+            success=0
+            printError "❌ ERROR: (direct) EVM Assembly JSON reimport failed for ${sol_file}"
+            if [[ $EXIT_ON_ERROR == 1 ]]
+            then
+                print_used_commands "$(pwd)" "${SOLC} --asm-json --import-asm-json expected.asm.json --pretty-json --json-indent 4 | tail -n+4" ""
+                return 1
+            fi
+        fi
+
+        # reformat json files using jq.
+        jq . expected.asm.json > expected.asm.json.pretty
+        jq . obtained_direct_import_export.json > obtained_direct_import_export.json.pretty
+
+        # compare expected and obtained evm assembly.
+        if ! diff_files expected.asm.json.pretty obtained_direct_import_export.json.pretty
+        then
+            success=0
+            printError "❌ ERROR: EVM Assembly JSON reimport failed for ${sol_file}"
+            if [[ $EXIT_ON_ERROR == 1 ]]
+            then
+                print_used_commands "$(pwd)" "${export_command[*]}" "${import_command[*]}"
+                return 1
+            fi
+        fi
+    done
+
+    if (( success == 1 ))
+    then
+        TESTED=$((TESTED + 1))
+    else
+        FAILED=$((FAILED + 1))
+    fi
+}
+
 # function tests whether exporting and importing again is equivalent.
 # Results are recorded by adding to FAILED or UNCOMPILABLE.
 # Also, in case of a mismatch a diff is printed
@@ -149,6 +251,7 @@ function test_import_export_equivalence {
     then
         case "$IMPORT_TEST_TYPE" in
             ast) ast_import_export_equivalence "${sol_file}" "${input_files[@]}" ;;
+            evm-assembly) evmjson_import_export_equivalence "${sol_file}" "${input_files[@]}" ;;
             *) fail "Unknown import test type '${IMPORT_TEST_TYPE}'. Aborting." ;;
         esac
     else
@@ -173,6 +276,7 @@ command_available jq --version
 
 case "$IMPORT_TEST_TYPE" in
     ast) TEST_DIRS=("${SYNTAXTESTS_DIR}" "${ASTJSONTESTS_DIR}") ;;
+    evm-assembly) TEST_DIRS=("${SEMANTICTESTS_DIR}") ;;
     *)  print_usage ;;
 esac
 
