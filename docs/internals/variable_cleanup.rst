@@ -69,5 +69,43 @@ Any invalid value will have the higher bits set to zero:
 
 .. code-block:: none
 
-    0101...1101 0000 0000   invalid value
-    0000...0000 0000 0000   cleaned value
+    0101...1101 0010 1010   invalid value
+    0000...0000 0010 1010   cleaned value
+
+For ``int8``, the signed 8-bit type, the valid values are:
+
+Negative
+
+.. code-block:: none
+
+    1111...1111 1111 1111
+    1111...1111 1111 1110
+    ....
+    1111...1111 1000 0000
+
+Positive
+
+.. code-block:: none
+
+    0000...0000 0000 0000
+    0000...0000 0000 0001
+    0000...0000 0000 0010
+    ....
+    0000...0000 1111 1111
+
+The compiler will ``signextend`` the sign bit, which is 1 for negative and 0 for
+positive values, overwriting the higher bits:
+
+Negative
+
+.. code-block:: none
+
+    0010...1010 1111 1111   invalid value
+    1111...1111 1111 1111   cleaned value
+
+Positive
+
+.. code-block:: none
+
+    1101...0101 0000 0100   invalid value
+    0000...0000 0000 0100   cleaned value
